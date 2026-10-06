@@ -34,6 +34,7 @@ const C_HEAD: u32 = rgb(21, 24, 30); // แถบหัว
 
 const WIN_W: i32 = 800;
 const WIN_H: i32 = 600;
+const DEFAULT_PCT: i32 = 80; // เปิดใหม่ทีไรกลับมาที่ 80%
 
 const TITLE_H: i32 = 32;
 const BTN_W: i32 = 46;
@@ -48,7 +49,7 @@ const THUMB: i32 = 16;
 const EDGE_M: i32 = 8; // ขอบสำหรับลากย่อ/ขยาย
 
 thread_local! {
-    static PCT: Cell<i32> = const { Cell::new(60) };
+    static PCT: Cell<i32> = const { Cell::new(DEFAULT_PCT) };
     static TOPMOST: Cell<bool> = const { Cell::new(false) };
     // โหมดเมาส์: 0=ว่าง 1=ลากย้าย 2=สไลเดอร์ 3=ย่อ/ขยาย
     static MODE: Cell<u8> = const { Cell::new(0) };
@@ -144,6 +145,28 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             HTCLIENT as LRESULT
         }
         WM_NCACTIVATE => 1,
+        WM_SETCURSOR => {
+            // เปลี่ยนรูปเมาส์ตามโซน ให้รู้ว่าตรงไหนลาก/ย่อขยายได้
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            ScreenToClient(hwnd, &mut pt);
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let (cx, cy, cw, ch) = (pt.x, pt.y, rc.right, rc.bottom);
+            let l = cx < EDGE_M;
+            let r = cx >= cw - EDGE_M;
+            let t = cy < EDGE_M;
+            let b = cy >= ch - EDGE_M;
+            let id = match (l, r, t, b) {
+                (true, _, true, _) | (_, true, _, true) => IDC_SIZENWSE,
+                (_, true, true, _) | (true, _, _, true) => IDC_SIZENESW,
+                (true, _, _, _) | (_, true, _, _) => IDC_SIZEWE,
+                (_, _, true, _) | (_, _, _, true) => IDC_SIZENS,
+                _ => IDC_ARROW,
+            };
+            SetCursor(LoadCursorW(std::ptr::null_mut(), id));
+            1
+        }
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -452,7 +475,9 @@ fn main() {
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             cls.as_ptr(),
             w("screen mask").as_ptr(),
-            WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
+            // ไม่ใส่ WS_MINIMIZEBOX/WS_MAXIMIZEBOX — ถ้าใส่ Windows จะเติม WS_CAPTION ให้เอง
+            // แล้ว DWM วาดกรอบขาวตอนไม่มี focus (ปุ่มย่อ/ขยายของเราสั่ง ShowWindow เองได้อยู่แล้ว)
+            WS_POPUP | WS_VISIBLE,
             (sw - WIN_W) / 2,
             (sh - WIN_H) / 2,
             WIN_W,
@@ -507,7 +532,7 @@ fn main() {
         FONT.with(|c| c.set(f as isize));
         FONT_S.with(|c| c.set(fs as isize));
 
-        SetLayeredWindowAttributes(hwnd, 0, alpha_of(60), LWA_ALPHA);
+        SetLayeredWindowAttributes(hwnd, 0, alpha_of(DEFAULT_PCT), LWA_ALPHA);
         ShowWindow(hwnd, SW_SHOW);
         InvalidateRect(hwnd, null(), 1);
         log(&format!("start ok hwnd={:?}", hwnd));
