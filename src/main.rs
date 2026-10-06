@@ -606,8 +606,13 @@ fn main() {
 
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let sh = GetSystemMetrics(SM_CYSCREEN);
+        // WS_EX_NOACTIVATE: หน้าต่างจะไม่ถูก activate เลย (คลิกก็ไม่ activate) ⇒
+        // DWM จะไม่วาดต่างกันระหว่าง active/inactive ⇒ ความโปร่งใสคงที่ตาม % ที่ตั้งไว้
+        // (อาการเดิม: เมาส์เข้า/ออกโซนแล้วหน้าต่างได้/เสีย activation ⇒ ดูเหมือน opacity เปลี่ยนเอง
+        //  วัดแล้ว 6 ต.ค. 26: alpha ในระบบ (LWA_ALPHA) ไม่เปลี่ยน แต่ภาพที่ composite ออกมาต่างกัน)
+        let ex_style = WS_EX_LAYERED | WS_EX_APPWINDOW | WS_EX_NOACTIVATE;
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_APPWINDOW,
+            ex_style,
             cls.as_ptr(),
             w("screen mask").as_ptr(),
             // WS_POPUP ล้วน (ไม่มี WS_CAPTION) → DWM ไม่วาดกรอบขาวรอบหน้าต่าง
