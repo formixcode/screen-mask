@@ -1,0 +1,9 @@
+# Rust build output
+/target/
+
+# คัดลอก exe ไว้รันเอง (ไม่ต้องเข้า git — build ใหม่ได้ตลอด)
+/screen_mask.exe
+
+# log / debug
+*.log
+*.pdb
