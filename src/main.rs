@@ -554,6 +554,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             0
         }
+        WM_SYSCOMMAND => {
+            log(&format!("WM_SYSCOMMAND wp=0x{wp:X} lp={lp}"));
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_ERASEBKGND => 1,
         WM_SIZE => {
             InvalidateRect(hwnd, null(), 1);
@@ -606,9 +610,12 @@ fn main() {
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             cls.as_ptr(),
             w("screen mask").as_ptr(),
-            // ไม่ใส่ WS_MINIMIZEBOX/WS_MAXIMIZEBOX — ถ้าใส่ Windows จะเติม WS_CAPTION ให้เอง
-            // แล้ว DWM วาดกรอบขาวตอนไม่มี focus (ปุ่มย่อ/ขยายของเราสั่ง ShowWindow เองได้อยู่แล้ว)
-            WS_POPUP | WS_VISIBLE,
+            // WS_POPUP ล้วน (ไม่มี WS_CAPTION) → DWM ไม่วาดกรอบขาวรอบหน้าต่าง
+            // ⚠️ แต่ต้องมี WS_MINIMIZEBOX ไม่งั้นคลิกไอคอนบน taskbar แล้วไม่ย่อ/ไม่โชว์
+            //    (ทดสอบ 6 ต.ค. 26 แล้ว: WS_POPUP + minbox/maxbox → Windows ไม่เติม WS_CAPTION,
+            //     ภาพหน้าต่างตอนไม่มี focus เท่ากันเป๊ะทุก pixel กับตอนไม่ใส่ — ไม่มีกรอบขาว)
+            //    อาการเดิม (ไม่ใส่ minbox): กดไอคอน taskbar แล้วเงียบ ไม่มี WM_SYSCOMMAND เข้ามาเลย
+            WS_POPUP | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
             (sw - WIN_W) / 2,
             (sh - WIN_H) / 2,
             WIN_W,

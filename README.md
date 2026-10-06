@@ -39,6 +39,10 @@ cargo build --release
   (`DWMWA_BORDER_COLOR` / `DWMWA_NCRENDERING_POLICY` ตอบ S_OK แต่คุมกรอบตัวนั้นไม่ได้)
   → การลากย้าย + ย่อ/ขยาย จึงทำเองในโค้ด: `WM_NCHITTEST` คืน `HTCLIENT` ทั้งใบ แล้วจัดการใน `WM_LBUTTONDOWN` / `WM_MOUSEMOVE` ด้วย `SetWindowPos`
   → สถานะการลากเก็บใน thread_local: `MODE` (0=ว่าง 1=ลากย้าย 2=สไลเดอร์ 3=ย่อขยาย) + `RZF` (bit 1=ซ้าย 2=ขวา 4=บน 8=ล่าง) + จุด/rect เริ่ม (`SX SY SL ST SR SB`)
+- **ต้องมี `WS_MINIMIZEBOX` ในสไตล์หน้าต่าง** (คู่กับ `WS_MAXIMIZEBOX`) — ถ้าไม่ใส่ คลิกไอคอนบน taskbar แล้ว **เงียบ ไม่ย่อ ไม่โชว์** (shell ไม่ส่ง `WM_SYSCOMMAND` มาให้เลย ไม่ใช่ปัญหาที่ `DefWindowProc`)
+  → ยืนยัน 6 ต.ค. 26: เปิด `WS_POPUP + WS_MINIMIZEBOX + WS_MAXIMIZEBOX` แล้ว Windows **ไม่เติม `WS_CAPTION`** ให้ (สไตล์จริงที่ได้ = `0x94030000` → caption=False, thickframe=False) และภาพหน้าต่างตอนไม่มี focus **เท่ากันเป๊ะทุก pixel** กับตอนไม่ใส่ minbox ⇒ ไม่มีกรอบขาวกลับมา
+  → อย่าถอดสองบิตนี้ออกเพราะเข้าใจว่าจะได้กรอบขาว — ตัวที่ทำให้กรอบขาวคือ `WS_THICKFRAME`/`WS_CAPTION` (ของเดิมเคยมี) ไม่ใช่ minbox
+  → พฤติกรรมที่ได้: คลิกไอคอน taskbar = ย่อ (ซ่อน), คลิกซ้ำ = โชว์ที่ตำแหน่งเดิม (`wp=0xF020` / `wp=0xF120` ใน log)
 - หน้าต่างต้องมี flag `CS_HREDRAW | CS_VREDRAW` ที่ class + สั่ง `InvalidateRect` ใน `WM_SIZE`
   ไม่งั้นลาก/ย่อขยายแล้วเส้นขอบเหลืองจะค้างซ้ำ (Windows ยืดภาพเดิม ไม่วาดใหม่)
 - ทั้งหน้าต่างใช้ `WS_EX_LAYERED` + `SetLayeredWindowAttributes(alpha)` → ปุ่ม/ข้อความทั้งหมดจางตาม opacity ด้วยกัน
