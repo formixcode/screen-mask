@@ -4,21 +4,24 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::null;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, Ellipse, EndPaint, FillRect,
-    FrameRect, GetStockObject, HFONT, InvalidateRect, PAINTSTRUCT, ScreenToClient, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, NULL_PEN, TRANSPARENT,
+    FrameRect, GetStockObject, GetTextExtentPoint32W, HFONT, InvalidateRect, PAINTSTRUCT,
+    ScreenToClient, SelectObject, SetBkMode, SetTextColor, TextOutW, NULL_PEN, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 // ---------- ชุดสีเข้มกลาง (โทนเดียวกับ ui_theme ของโปรเจกต์) ----------
@@ -38,8 +41,11 @@ const DEFAULT_PCT: i32 = 80; // เปิดใหม่ทีไรกลับ
 
 const TITLE_H: i32 = 32;
 const BTN_W: i32 = 46;
-const BTN_N: usize = 4; // 0 = on top · 1 = ย่อ · 2 = ขยาย · 3 = ปิด
-const BTN_LABELS: [&str; 4] = ["T", "-", "\u{25A1}", "X"]; // □ = ขยาย
+const BTN_N: usize = 5; // 0 = click-through · 1 = on top · 2 = ย่อ · 3 = ขยาย · 4 = ปิด
+const BTN_LABELS: [&str; 5] = ["C", "T", "-", "\u{25A1}", "X"]; // □ = ขยาย
+const HOTKEY_ID: i32 = 0x5C01; // Ctrl+Alt+Shift+C = เปิด/ปิด click-through
+const TIMER_THROUGH: usize = 0x5C02; // timer ตรวจตำแหน่งเมาส์ตอนโหมดคลิกทะลุเปิด
+const TIMER_MS: u32 = 25;
 
 const TEXT_Y: i32 = TITLE_H + 18;
 const TRACK_X: i32 = 26;
@@ -51,6 +57,8 @@ const EDGE_M: i32 = 8; // ขอบสำหรับลากย่อ/ขย�
 thread_local! {
     static PCT: Cell<i32> = const { Cell::new(DEFAULT_PCT) };
     static TOPMOST: Cell<bool> = const { Cell::new(false) };
+    static THROUGH: Cell<bool> = const { Cell::new(false) }; // คลิกทะลุ (mouse ผ่านไปหน้าต่างข้างหลัง)
+    static TRANSPARENT_ON: Cell<bool> = const { Cell::new(false) }; // บิต WS_EX_TRANSPARENT ตอนนี้ติดอยู่ไหม
     // โหมดเมาส์: 0=ว่าง 1=ลากย้าย 2=สไลเดอร์ 3=ย่อ/ขยาย
     static MODE: Cell<u8> = const { Cell::new(0) };
     static RZF: Cell<u32> = const { Cell::new(0) }; // 1=ซ้าย 2=ขวา 4=บน 8=ล่าง
@@ -131,6 +139,100 @@ unsafe fn toggle_topmost(hwnd: HWND) {
     InvalidateRect(hwnd, null(), 1);
 }
 
+// เปิด/ปิดโหมดคลิกทะลุ
+// ใช้ WS_EX_TRANSPARENT (ทะลุข้ามโปรแกรมได้จริง — HTTRANSPARENT ทำไม่ได้) แต่สลับบิตตาม
+// ตำแหน่งเมาส์ทุก 25 ms: เมาส์อยู่บน "โซนใช้งาน" (แถบหัว/สไลเดอร์/ขอบ) = ถอดบิตให้คลิกได้
+// เมาส์อยู่บนพื้นที่ว่าง = ใส่บิตให้ทะลุไปหน้าต่างข้างหลัง
+unsafe fn set_through(hwnd: HWND, on: bool) {
+    THROUGH.with(|c| c.set(on));
+    if on {
+        SetTimer(hwnd, TIMER_THROUGH, TIMER_MS, None);
+        refresh_through(hwnd);
+    } else {
+        KillTimer(hwnd, TIMER_THROUGH);
+        set_transparent(hwnd, false);
+        // ถ้าปิดโหมดระหว่างลากอยู่ ให้คืนสถานะเมาส์ให้ปกติ
+        if MODE.with(|c| c.get()) != 0 {
+            MODE.with(|c| c.set(0));
+            ReleaseCapture();
+        }
+    }
+    log(&format!("set_through on={on}"));
+    InvalidateRect(hwnd, null(), 1);
+}
+
+unsafe fn toggle_through(hwnd: HWND) {
+    set_through(hwnd, !THROUGH.with(|c| c.get()));
+}
+
+// ใส่/ถอดบิต WS_EX_TRANSPARENT จริง (ทำเฉพาะตอนสถานะเปลี่ยน — timer เรียกทุก 25 ms)
+unsafe fn set_transparent(hwnd: HWND, on: bool) {
+    if TRANSPARENT_ON.with(|c| c.get()) == on {
+        return;
+    }
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let new = if on {
+        ex | WS_EX_TRANSPARENT
+    } else {
+        ex & !WS_EX_TRANSPARENT
+    };
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new as isize);
+    SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_FRAMECHANGED,
+    );
+    TRANSPARENT_ON.with(|c| c.set(on));
+    log(&format!("transparent={on}"));
+}
+
+// ยิงทุก 25 ms ตอนโหมดเปิด — ตัดสินว่าตอนนี้ควรทะลุหรือไม่
+unsafe fn refresh_through(hwnd: HWND) {
+    if !THROUGH.with(|c| c.get()) {
+        return;
+    }
+    // กำลังลาก/ย่อขยาย/ลากสไลเดอร์ = เมาส์ถูกจับไว้ ห้ามทะลุ
+    if MODE.with(|c| c.get()) != 0 {
+        set_transparent(hwnd, false);
+        return;
+    }
+    let mut pt = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut pt);
+    let mut cl = pt;
+    ScreenToClient(hwnd, &mut cl);
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rc);
+    let inside = cl.x >= 0 && cl.y >= 0 && cl.x < rc.right && cl.y < rc.bottom;
+    // นอกหน้าต่าง = ไม่มีอะไรให้คลิกอยู่แล้ว · ในหน้าต่าง = ทะลุเฉพาะพื้นที่ว่าง
+    let want = !inside || point_is_through(hwnd, cl.x, cl.y);
+    set_transparent(hwnd, want);
+}
+
+// true = จุดนี้เป็น "พื้นที่ว่าง" ให้เมาส์ทะลุผ่านไปหน้าต่างข้างหลัง
+unsafe fn point_is_through(hwnd: HWND, cx: i32, cy: i32) -> bool {
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rc);
+    let (cw, ch) = (rc.right, rc.bottom);
+
+    // แถบหัวทั้งแถว = กดปุ่มได้ + ลากย้ายหน้าต่างได้
+    if cy < TITLE_H {
+        return false;
+    }
+    // ขอบ 8 px + มุม = ย่อ/ขยายได้
+    if cx < EDGE_M || cx >= cw - EDGE_M || cy >= ch - EDGE_M {
+        return false;
+    }
+    // แถบสไลเดอร์ (รวมโซนกด ±14 px รอบแท่ง)
+    if cy >= TRACK_Y - 14 && cy <= TRACK_Y + TRACK_H + 14 {
+        return false;
+    }
+    true
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_NCCALCSIZE => {
@@ -141,7 +243,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
         }
         WM_NCHITTEST => {
-            // ทำลาก/ย่อขยายเอง → คืน HTCLIENT หมด เพื่อรับเมาส์เอง (ไม่มีกรอบขาวของระบบ)
+            // ทำลาก/ย่อขยายเอง → คืน HTCLIENT เพื่อรับเมาส์เอง (ไม่มีกรอบขาวของระบบ)
+            // (โหมดคลิกทะลุใช้ WS_EX_TRANSPARENT สลับตามตำแหน่งเมาส์ใน refresh_through ไม่ใช่ตรงนี้)
             HTCLIENT as LRESULT
         }
         WM_NCACTIVATE => 1,
@@ -199,9 +302,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 
             // ปุ่มบนแถบหัว
             let on_top = TOPMOST.with(|c| c.get());
+            let through = THROUGH.with(|c| c.get());
             for (i, label) in BTN_LABELS.iter().enumerate() {
                 let b = btn_rect(i, cw);
-                let active = i == 0 && on_top;
+                let active = (i == 0 && through) || (i == 1 && on_top);
                 if active {
                     let fb = CreateSolidBrush(C_EDGE);
                     let fr = RECT { left: b.x, top: b.y, right: b.x + b.w, bottom: b.y + b.h };
@@ -214,6 +318,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 SetTextColor(hdc, col);
                 let tx = b.x + if *label == "-" { 20 } else { 18 };
                 TextOutW(hdc, tx, 8, txt.as_ptr(), txt.len() as i32);
+                SelectObject(hdc, old);
+            }
+
+            // ป้ายบอกสถานะตอนเปิดคลิกทะลุ
+            if through {
+                let tip: Vec<u16> = "click-through เปิด — ปุ่ม/สไลเดอร์/แถบหัว ยังกดได้ (ที่เหลือทะลุ)".encode_utf16().collect();
+                let mut sz: SIZE = std::mem::zeroed();
+                GetTextExtentPoint32W(hdc, tip.as_ptr(), tip.len() as i32, &mut sz);
+                let bx = (btn_rect(0, cw).x - 14 - sz.cx).max(120);
+                let old = SelectObject(hdc, font_s as _);
+                SetTextColor(hdc, C_EDGE);
+                TextOutW(hdc, bx, 8, tip.as_ptr(), tip.len() as i32);
                 SelectObject(hdc, old);
             }
 
@@ -272,11 +388,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             for i in 0..BTN_N {
                 if btn_rect(i, cw).inside(cx, cy) {
                     match i {
-                        0 => toggle_topmost(hwnd),
-                        1 => {
+                        0 => toggle_through(hwnd),
+                        1 => toggle_topmost(hwnd),
+                        2 => {
                             ShowWindow(hwnd, SW_MINIMIZE);
                         }
-                        2 => {
+                        3 => {
                             if IsZoomed(hwnd) != 0 {
                                 ShowWindow(hwnd, SW_RESTORE);
                             } else {
@@ -391,11 +508,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     if f & 8 != 0 {
                         b += dy;
                     }
-                    if r - l < 240 {
+                    if r - l < 300 {
                         if f & 1 != 0 {
-                            l = r - 240;
+                            l = r - 300;
                         } else {
-                            r = l + 240;
+                            r = l + 300;
                         }
                     }
                     if b - t < 160 {
@@ -425,12 +542,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             0
         }
+        WM_TIMER => {
+            if wp == TIMER_THROUGH {
+                refresh_through(hwnd);
+            }
+            0
+        }
+        WM_HOTKEY => {
+            if wp as i32 == HOTKEY_ID {
+                toggle_through(hwnd);
+            }
+            0
+        }
         WM_ERASEBKGND => 1,
         WM_SIZE => {
             InvalidateRect(hwnd, null(), 1);
             0
         }
         WM_DESTROY => {
+            UnregisterHotKey(hwnd, HOTKEY_ID);
+            KillTimer(hwnd, TIMER_THROUGH);
             let f = FONT.with(|c| c.get());
             if f != 0 {
                 DeleteObject(f as _);
@@ -535,6 +666,16 @@ fn main() {
         SetLayeredWindowAttributes(hwnd, 0, alpha_of(DEFAULT_PCT), LWA_ALPHA);
         ShowWindow(hwnd, SW_SHOW);
         InvalidateRect(hwnd, null(), 1);
+
+        // hotkey เปิด/ปิดคลิกทะลุ — จำเป็น เพราะตอนเปิดโหมดนั้นกดปุ่มบนหน้าต่างไม่ได้แล้ว
+        let hk = RegisterHotKey(
+            hwnd,
+            HOTKEY_ID,
+            MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
+            'C' as u32,
+        );
+        log(&format!("RegisterHotKey Ctrl+Alt+Shift+C ok={hk}"));
+
         log(&format!("start ok hwnd={:?}", hwnd));
 
         let mut msg: MSG = std::mem::zeroed();
